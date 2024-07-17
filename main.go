@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -29,17 +28,30 @@ func formatDuration(duration time.Duration) string {
 	return fmt.Sprintf("%d days %d hours %d minutes %d seconds", days, hours, minutes, seconds)
 }
 
+func isLetter(c rune) bool {
+	return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
+}
+
+func containsLetters(s string) bool {
+	for _, c := range s {
+		if !isLetter(c) {
+			return false
+		}
+	}
+	return true
+}
+
 func checkWebPage(number string) bool {
 	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Println(time.Now().Format(time.RFC3339), "Error fetching webpage:", err)
+		log.Fatal(time.Now().Format(time.RFC3339), "Error fetching webpage:", err)
 		return false
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Println(time.Now().Format(time.RFC3339), "Error reading response body:", err)
+		log.Fatal(time.Now().Format(time.RFC3339), "Error reading response body:", err)
 		return false
 	}
 
@@ -48,17 +60,13 @@ func checkWebPage(number string) bool {
 		log.Fatal(err)
 	}
 
-	fmt.Println("Checking for tracking number " + number)
+	log.Println("Checking for tracking number " + number)
 
 	found := false
-	doc.Find("table").Each(func(index int, tablehtml *goquery.Selection) {
-		tablehtml.Find("tr").Each(func(indextr int, rowhtml *goquery.Selection) {
-			rowhtml.Find("td").Each(func(indexth int, tablecell *goquery.Selection) {
-				if strings.EqualFold(strings.TrimSpace(tablecell.Text()), number) {
-					found = true
-				}
-			})
-		})
+	doc.Find("table tr td").Each(func(indexth int, tablecell *goquery.Selection) {
+		if strings.EqualFold(strings.TrimSpace(tablecell.Text()), number) {
+			found = true
+		}
 	})
 
 	return found
@@ -78,11 +86,10 @@ func startChecking(update tgbotapi.Update, bot *tgbotapi.BotAPI, number string, 
 				formattedElapsedTime := formatDuration(elapsedTime)
 				msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Your documents are ready! Elapsed Time: %s", formattedElapsedTime))
 				bot.Send(msg)
-				fmt.Println(time.Now().Format(time.RFC3339), "Ready")
-				fmt.Println("Elapsed Time:", formattedElapsedTime)
+				log.Println("Found. Elapsed Time:", formattedElapsedTime)
 				return
 			} else {
-				fmt.Println("Tracking number not found")
+				log.Println("Tracking number not found")
 			}
 			time.Sleep(time.Second * 10)
 		}
@@ -90,7 +97,18 @@ func startChecking(update tgbotapi.Update, bot *tgbotapi.BotAPI, number string, 
 }
 
 func main() {
-	err := godotenv.Load()
+	file, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("Failed to open log file: %v", err)
+	}
+	defer file.Close()
+
+	log.SetOutput(file)
+
+	os.Stdout = file
+	os.Stderr = file
+
+	err = godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
@@ -114,7 +132,6 @@ func main() {
 	quit := make(chan bool)
 
 	updates := bot.GetUpdatesChan(u)
-	started := false
 
 	for update := range updates {
 		if update.Message.IsCommand() {
@@ -122,7 +139,6 @@ func main() {
 			case "start":
 				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Send me tracking number")
 				bot.Send(msg)
-				started = true
 				continue
 			case "stop":
 				quit <- true
@@ -140,17 +156,14 @@ func main() {
 			}
 		}
 
-		if started {
-			number := update.Message.Text
-			if _, err := strconv.Atoi(number); err != nil {
-				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Doesn't look like a valid tracking number, try again")
-				bot.Send(msg)
-			} else {
-				started = false
-				go startChecking(update, bot, number, quit)
-				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Started checking the webpage, wait for notification")
-				bot.Send(msg)
-			}
+		number := update.Message.Text
+		if !containsLetters(number) {
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Doesn't look like a valid tracking number, try again")
+			bot.Send(msg)
+		} else {
+			go startChecking(update, bot, number, quit)
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Started checking the webpage, wait for notification")
+			bot.Send(msg)
 		}
 	}
 }
