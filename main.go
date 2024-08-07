@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 const url = "http://knvsh.gov.spb.ru/gosuslugi/svedeniya2/"
@@ -44,23 +46,24 @@ func containsLetters(s string) bool {
 func checkWebPage(number string) bool {
 	resp, err := http.Get(url)
 	if err != nil {
-		log.Fatal(time.Now().Format(time.RFC3339), "Error fetching webpage:", err)
+		log.Printf("Error fetching webpage: %v", err)
 		return false
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatal(time.Now().Format(time.RFC3339), "Error reading response body:", err)
+		log.Printf("Error reading response body: %v", err)
 		return false
 	}
 
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(body)))
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Error parsing webpage: %v", err)
+		return false
 	}
 
-	log.Println("Checking for tracking number " + number)
+	log.Printf("Checking for tracking number %s", number)
 
 	found := false
 	doc.Find("table tr td").Each(func(indexth int, tablecell *goquery.Selection) {
@@ -72,7 +75,7 @@ func checkWebPage(number string) bool {
 	return found
 }
 
-func startChecking(update tgbotapi.Update, bot *tgbotapi.BotAPI, number string, quit chan bool) {
+func startChecking(update tgbotapi.Update, bot *tgbotapi.BotAPI, number string, quit chan bool, db *sql.DB) {
 	startTime := time.Now()
 
 	for {
@@ -86,14 +89,90 @@ func startChecking(update tgbotapi.Update, bot *tgbotapi.BotAPI, number string, 
 				formattedElapsedTime := formatDuration(elapsedTime)
 				msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Your documents are ready! Elapsed Time: %s", formattedElapsedTime))
 				bot.Send(msg)
-				log.Println("Found. Elapsed Time:", formattedElapsedTime)
+				log.Printf("Found tracking number %s. Elapsed Time: %s", number, formattedElapsedTime)
+
+				if err := deleteTrackingNumber(db, number); err != nil {
+					log.Printf("Error deleting tracking number %s: %v", number, err)
+				}
 				return
 			} else {
-				log.Println("Tracking number not found")
+				log.Printf("Tracking number %s not found", number)
 			}
 			time.Sleep(time.Second * 10)
 		}
 	}
+}
+
+func createTrackingNumber(db *sql.DB, userID int64, number string) error {
+	fmt.Println("createTrackingNumber")
+	sqlStatement := `
+        INSERT INTO users (userid, tracking)
+        VALUES ($1, $2)`
+	_, err := db.Exec(sqlStatement, userID, number)
+	return err
+}
+
+func deleteTrackingNumber(db *sql.DB, number string) error {
+	fmt.Println("deleteTrackingNumber")
+	sqlStatement := `
+        DELETE FROM users
+        WHERE tracking = $1`
+	_, err := db.Exec(sqlStatement, number)
+	return err
+}
+
+func loadTrackingNumbers(db *sql.DB) (map[int64][]string, error) {
+	fmt.Println("loadTrackingNumbers")
+	trackingNumbers := make(map[int64][]string)
+	rows, err := db.Query("SELECT userid, tracking FROM users")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var userID int64
+		var number string
+		if err := rows.Scan(&userID, &number); err != nil {
+			return nil, err
+		}
+		trackingNumbers[userID] = append(trackingNumbers[userID], number)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return trackingNumbers, nil
+}
+
+func initDB() (*sql.DB, error) {
+	fmt.Println("initDB")
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+
+	pgUsername := os.Getenv("PG_USERNAME")
+	pgPassword := os.Getenv("PG_PASSWORD")
+	dbName := os.Getenv("DB_NAME")
+
+	if pgUsername == "" || pgPassword == "" || dbName == "" {
+		log.Fatal("Database configuration not set")
+	}
+
+	psqlInfo := fmt.Sprintf("host=localhost port=5432 user=%s password=%s dbname=%s sslmode=disable", pgUsername, pgPassword, dbName)
+	db, err := sql.Open("postgres", psqlInfo)
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.Ping()
+	if err != nil {
+		return nil, err
+	}
+
+	return db, nil
 }
 
 func main() {
@@ -105,13 +184,11 @@ func main() {
 
 	log.SetOutput(file)
 
-	os.Stdout = file
-	os.Stderr = file
-
-	err = godotenv.Load()
+	db, err := initDB()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		log.Fatal(err)
 	}
+	defer db.Close()
 
 	authToken := os.Getenv("AUTH_TOKEN")
 	if authToken == "" {
@@ -133,27 +210,25 @@ func main() {
 
 	updates := bot.GetUpdatesChan(u)
 
+	trackingNumbers, err := loadTrackingNumbers(db)
+	if err != nil {
+		log.Fatalf("Failed to load tracking numbers: %v", err)
+	}
+
+	for userID, numbers := range trackingNumbers {
+		for _, number := range numbers {
+			go startChecking(tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: userID}}}, bot, number, quit, db)
+		}
+	}
+
 	for update := range updates {
+		if update.Message == nil {
+			continue
+		}
+
 		if update.Message.IsCommand() {
-			switch update.Message.Command() {
-			case "start":
-				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Send me tracking number")
-				bot.Send(msg)
-				continue
-			case "stop":
-				quit <- true
-				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Polling stopped")
-				bot.Send(msg)
-				continue
-			case "help":
-				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "This bot fetches the content of "+url+" every minute")
-				bot.Send(msg)
-				continue
-			default:
-				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "I don't know that command")
-				bot.Send(msg)
-				continue
-			}
+			handleCommand(update, bot, quit)
+			continue
 		}
 
 		number := update.Message.Text
@@ -161,9 +236,34 @@ func main() {
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Doesn't look like a valid tracking number, try again")
 			bot.Send(msg)
 		} else {
-			go startChecking(update, bot, number, quit)
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Started checking the webpage, wait for notification")
-			bot.Send(msg)
+			err := createTrackingNumber(db, update.Message.From.ID, number)
+			if err != nil {
+				log.Printf("Error inserting tracking number: %v", err)
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Failed to save your tracking number, try again later")
+				bot.Send(msg)
+			} else {
+				go startChecking(update, bot, number, quit, db)
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Started checking the webpage, wait for notification")
+				bot.Send(msg)
+			}
 		}
+	}
+}
+
+func handleCommand(update tgbotapi.Update, bot *tgbotapi.BotAPI, quit chan bool) {
+	switch update.Message.Command() {
+	case "start":
+		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Send me tracking number")
+		bot.Send(msg)
+	case "stop":
+		quit <- true
+		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Polling stopped")
+		bot.Send(msg)
+	case "help":
+		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "This bot fetches the content of "+url+" every minute")
+		bot.Send(msg)
+	default:
+		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "I don't know that command")
+		bot.Send(msg)
 	}
 }
