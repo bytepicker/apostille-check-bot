@@ -41,7 +41,7 @@ func containsLetters(s string) bool {
 	return true
 }
 
-func checkWebPage(number string) bool {
+func checkWebPage(number string) (bool, int64) {
 	resp, err := http.Get(url)
 	if err != nil {
 		log.Fatal(time.Now().Format(time.RFC3339), "Error fetching webpage:", err)
@@ -60,17 +60,24 @@ func checkWebPage(number string) bool {
 		log.Fatal(err)
 	}
 
-	log.Println("Checking for tracking number " + number)
 
-	found := false
-	doc.Find("table tr td").Each(func(indexth int, tablecell *goquery.Selection) {
-		if strings.EqualFold(strings.TrimSpace(tablecell.Text()), number) {
-			found = true
-		}
-	})
+	for id, number := range m {
+		log.Println("Checking for tracking number " + number)
+
+		found := false
+		doc.Find("table tr td").Each(func(indexth int, tablecell *goquery.Selection) {
+			if strings.EqualFold(strings.TrimSpace(tablecell.Text()), number) {
+				found = true
+			}
+		})
+	}
+
+
 
 	return found
 }
+
+func beginChecking(update.Message.Chat.ID int64, )
 
 func startChecking(update tgbotapi.Update, bot *tgbotapi.BotAPI, number string, quit chan bool) {
 	startTime := time.Now()
@@ -96,7 +103,35 @@ func startChecking(update tgbotapi.Update, bot *tgbotapi.BotAPI, number string, 
 	}
 }
 
+func startChecking_2(bot *tgbotapi.BotAPI, quit chan bool) {
+	startTime := time.Now()
+
+	for {
+		select {
+		case <-quit:
+			return
+		default:
+			if checkWebPage(number) {
+				endTime := time.Now()
+				elapsedTime := endTime.Sub(startTime)
+				formattedElapsedTime := formatDuration(elapsedTime)
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Your documents are ready! Elapsed Time: %s", formattedElapsedTime))
+				bot.Send(msg)
+				log.Println("Found. Elapsed Time:", formattedElapsedTime)
+				return
+			} else {
+				log.Println("Tracking number not found")
+			}
+			time.Sleep(time.Second * 10)
+		}
+	}
+}
+
+var m map[int64]string
+
 func main() {
+	m = make(map[int64]string)
+
 	file, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		log.Fatalf("Failed to open log file: %v", err)
@@ -133,6 +168,8 @@ func main() {
 
 	updates := bot.GetUpdatesChan(u)
 
+	go startChecking(update, bot, number, quit)
+
 	for update := range updates {
 		if update.Message.IsCommand() {
 			switch update.Message.Command() {
@@ -141,7 +178,7 @@ func main() {
 				bot.Send(msg)
 				continue
 			case "stop":
-				quit <- true
+				delete(m, update.Message.Chat.ID)
 				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Polling stopped")
 				bot.Send(msg)
 				continue
@@ -161,9 +198,10 @@ func main() {
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Doesn't look like a valid tracking number, try again")
 			bot.Send(msg)
 		} else {
-			go startChecking(update, bot, number, quit)
+			m[update.Message.Chat.ID] = number
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Started checking the webpage, wait for notification")
 			bot.Send(msg)
 		}
 	}
+	quit <- true
 }
