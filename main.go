@@ -36,11 +36,11 @@ func isLetter(c rune) bool {
 
 func containsLetters(s string) bool {
 	for _, c := range s {
-		if !isLetter(c) {
-			return false
+		if isLetter(c) {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 func checkWebPage(number string) bool {
@@ -98,13 +98,12 @@ func startChecking(update tgbotapi.Update, bot *tgbotapi.BotAPI, number string, 
 			} else {
 				log.Printf("Tracking number %s not found", number)
 			}
-			time.Sleep(time.Second * 10)
+			time.Sleep(time.Minute)
 		}
 	}
 }
 
 func createTrackingNumber(db *sql.DB, userID int64, number string) error {
-	fmt.Println("createTrackingNumber")
 	sqlStatement := `
         INSERT INTO users (userid, tracking)
         VALUES ($1, $2)`
@@ -113,7 +112,6 @@ func createTrackingNumber(db *sql.DB, userID int64, number string) error {
 }
 
 func deleteTrackingNumber(db *sql.DB, number string) error {
-	fmt.Println("deleteTrackingNumber")
 	sqlStatement := `
         DELETE FROM users
         WHERE tracking = $1`
@@ -122,7 +120,6 @@ func deleteTrackingNumber(db *sql.DB, number string) error {
 }
 
 func loadTrackingNumbers(db *sql.DB) (map[int64][]string, error) {
-	fmt.Println("loadTrackingNumbers")
 	trackingNumbers := make(map[int64][]string)
 	rows, err := db.Query("SELECT userid, tracking FROM users")
 	if err != nil {
@@ -147,7 +144,6 @@ func loadTrackingNumbers(db *sql.DB) (map[int64][]string, error) {
 }
 
 func initDB() (*sql.DB, error) {
-	fmt.Println("initDB")
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
@@ -232,7 +228,7 @@ func main() {
 		}
 
 		number := update.Message.Text
-		if !containsLetters(number) {
+		if containsLetters(number) {
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Doesn't look like a valid tracking number, try again")
 			bot.Send(msg)
 		} else {
